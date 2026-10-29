@@ -189,15 +189,50 @@ for bin in "${RUST_BINS[@]}"; do
     (cd rust && cargo build --quiet --bin "$bin")
 done
 
+log "starting datastores"
+# Same compose project and files as the stack's docker-compose unit, so `hogli up` reuses these containers.
+docker compose -p posthog -f docker-compose.dev.yml -f docker-compose.profiles.yml \
+    up -d --quiet-pull db redis7 zookeeper kafka clickhouse objectstorage
+bin/wait-for-docker
+
+log "running migrations"
+# Run them here, in order, rather than in the stack's parallel migrate-* units, so each
+# is timed in this log. Same env precedence as bin/start: shell, .env.local, then the
+# committed defaults. This mirrors bake-posthog-dev-stack.sh.
+load_env_defaults() {
+    local name value
+    while IFS='=' read -r name value; do
+        [[ -z "$name" || "$name" == \#* || "$value" == *op://* ]] && continue
+        if [[ -z "${!name:-}" ]]; then
+            export "$name=$value"
+        fi
+    done < "$1"
+}
+(
+    load_env_defaults .env.local
+    load_env_defaults .env.development
+    load_env_defaults .env.services
+    export PERSONS_DB_WRITER_URL="${PERSONS_DB_WRITER_URL:-postgres://posthog:posthog@db:5432/posthog_persons}"
+    export CYCLOTRON_NODE_DATABASE_URL="${CYCLOTRON_NODE_DATABASE_URL:-postgres://posthog:posthog@db:5432/cyclotron_node}"
+    export BEHAVIORAL_COHORTS_DATABASE_URL="${BEHAVIORAL_COHORTS_DATABASE_URL:-postgres://posthog:posthog@db:5432/behavioral_cohorts}"
+    export FLAGS_READ_STORE_DATABASE_URL="${FLAGS_READ_STORE_DATABASE_URL:-postgres://posthog:posthog@db:5432/flags_read_store}"
+    # ClickHouse migrations need the instance settings table that the Postgres migrations create.
+    bin/migrate --scope=postgres --scope=persons
+    log "  postgres and persons done"
+    bin/migrate --scope=clickhouse
+    log "  clickhouse done"
+    # The default intent does not run these scopes, and the nodejs workers need cyclotron's tables.
+    bin/migrate --scope=cyclotron --scope=behavioral-cohorts --scope=flags-read-store
+    log "  cyclotron, behavioral-cohorts and flags-read-store done"
+) > "$REPO_ROOT/.posthog/on-warm-migrate.log" 2>&1 || {
+    echo "[on-warm] migrations failed:" >&2
+    tail -n 40 "$REPO_ROOT/.posthog/on-warm-migrate.log" >&2
+    exit 1
+}
+grep "\[on-warm\]" "$REPO_ROOT/.posthog/on-warm-migrate.log" || true
+
 log "starting the dev stack"
 hogli up -d -y
-
-# The default intent does not run these scopes, and the nodejs workers need
-# cyclotron's tables. bake-posthog-dev-stack.sh runs them by hand for the same reason.
-bin/wait-for-docker
-export CYCLOTRON_NODE_DATABASE_URL="${CYCLOTRON_NODE_DATABASE_URL:-postgres://posthog:posthog@db:5432/cyclotron_node}"
-export FLAGS_READ_STORE_DATABASE_URL="${FLAGS_READ_STORE_DATABASE_URL:-postgres://posthog:posthog@db:5432/flags_read_store}"
-bin/migrate --scope=cyclotron --scope=flags-read-store
 
 log "waiting for the stack to be ready (up to ${STACK_TIMEOUT_SECONDS}s)"
 # `phrocs wait` returns on the first crash, but phrocs restarts a crashed unit by
@@ -211,7 +246,7 @@ until phrocs wait --timeout "$((deadline > SECONDS ? deadline - SECONDS : 1))"; 
     if [[ "$rc" -ne 1 || "$crashes" -ge 5 || "$SECONDS" -ge "$deadline" ]]; then
         echo "[on-warm] the dev stack did not become ready. Logs: $REPO_ROOT/.posthog/.generated/logs/" >&2
         # phrocs prints only the tail of a crashed unit. Show where each panic starts.
-        grep -m1 -H -A12 -E "fatal error|panic:|Traceback" .posthog/.generated/logs/*.log >&2 || true
+        grep -m1 -H -B2 -A12 -iE "fatal error|panic:|out of memory" .posthog/.generated/logs/*.log >&2 || true
         exit 1
     fi
     log "a unit crashed and phrocs restarts it, waiting again (${crashes})"
