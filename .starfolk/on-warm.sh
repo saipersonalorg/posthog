@@ -195,6 +195,14 @@ docker compose -p posthog -f docker-compose.dev.yml -f docker-compose.profiles.y
     up -d --quiet-pull db redis7 zookeeper kafka clickhouse objectstorage
 bin/wait-for-docker
 
+db_relations="$(docker compose -p posthog -f docker-compose.dev.yml exec -T db \
+    psql -qAt -U posthog posthog -c "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'" 2> /dev/null || echo 0)"
+if [[ "${db_relations:-0}" == "0" && -z "${POSTHOG_SCHEMA_ARTIFACT_TOKEN:-}" ]]; then
+    echo "[on-warm] POSTHOG_SCHEMA_ARTIFACT_TOKEN is not set, so an empty database would replay every migration" >&2
+    echo "[on-warm] and exceed the on-warm timeout. Add a read-only GitHub token under that name to this environment's secrets." >&2
+    exit 1
+fi
+
 log "running migrations"
 # Run them here, in order, rather than in the stack's parallel migrate-* units, so each
 # is timed in this log. Same env precedence as bin/start: shell, .env.local, then the
@@ -218,7 +226,14 @@ load_env_defaults() {
     export FLAGS_READ_STORE_DATABASE_URL="${FLAGS_READ_STORE_DATABASE_URL:-postgres://posthog:posthog@db:5432/flags_read_store}"
     # On an empty database, load the schema snapshot first, as the stack's migrate-postgres
     # unit does. Replaying the full migration history takes far longer than on-warm allows.
-    bin/hogli db:restore-schema-if-fresh
+    # The snapshot is a GitHub Actions artifact, and artifact downloads need a token. A
+    # warming box has no user login, so it comes from an environment secret. It is passed
+    # to this one command only, so it never overrides a user's own gh login.
+    if [[ -n "${POSTHOG_SCHEMA_ARTIFACT_TOKEN:-}" ]]; then
+        GH_TOKEN="$POSTHOG_SCHEMA_ARTIFACT_TOKEN" bin/hogli db:restore-schema-if-fresh --mode on
+    else
+        bin/hogli db:restore-schema-if-fresh
+    fi
     log "  schema snapshot step done"
     # ClickHouse migrations need the instance settings table that the Postgres migrations create.
     bin/migrate --scope=postgres --scope=persons
