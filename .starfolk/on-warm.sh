@@ -216,6 +216,10 @@ load_env_defaults() {
     export CYCLOTRON_NODE_DATABASE_URL="${CYCLOTRON_NODE_DATABASE_URL:-postgres://posthog:posthog@db:5432/cyclotron_node}"
     export BEHAVIORAL_COHORTS_DATABASE_URL="${BEHAVIORAL_COHORTS_DATABASE_URL:-postgres://posthog:posthog@db:5432/behavioral_cohorts}"
     export FLAGS_READ_STORE_DATABASE_URL="${FLAGS_READ_STORE_DATABASE_URL:-postgres://posthog:posthog@db:5432/flags_read_store}"
+    # On an empty database, load the schema snapshot first, as the stack's migrate-postgres
+    # unit does. Replaying the full migration history takes far longer than on-warm allows.
+    bin/hogli db:restore-schema-if-fresh
+    log "  schema snapshot step done"
     # ClickHouse migrations need the instance settings table that the Postgres migrations create.
     bin/migrate --scope=postgres --scope=persons
     log "  postgres and persons done"
