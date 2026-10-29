@@ -23,12 +23,19 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# debugpy's startup handshake fails when another process connects to its local ports first, which a
+# remote box's port scanner does. Set POSTHOG_DEBUGPY=0 to start the backend without it.
+DEBUGPY_ARGS=()
+if [[ -n "$DEBUG" && "${POSTHOG_DEBUGPY:-1}" != "0" ]]; then
+    DEBUGPY_ARGS=(-m debugpy --listen 127.0.0.1:5678)
+fi
+
 # --workers-kill-timeout bounds the reload. Granian defaults it to disabled, which means it joins
 # the old worker with no timeout and only escalates to a hard kill when the flag is set. An open SSE
 # stream (an agent run log held by a browser tab) never finishes on its own, so without this the
 # worker never exits, the replacement is never spawned, and port 8000 stays dead until it is killed
 # by hand. A worker with nothing in flight still exits immediately, so normal reloads are unaffected.
-python ${DEBUG:+ -m debugpy --listen 127.0.0.1:5678} -m granian \
+python "${DEBUGPY_ARGS[@]}" -m granian \
     --interface asgi \
     posthog.asgi:application \
     --reload \
