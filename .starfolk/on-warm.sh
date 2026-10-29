@@ -32,6 +32,21 @@ export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 # on a box that is warming, and a running stack is never restarted below.
 export HOGLI_SKIP_ZOMBIE_CHECK=1
 
+# The image routes rustc through a shared sccache server. A server that another
+# user started writes build outputs this user cannot overwrite, and cargo then
+# fails with "Permission denied" on its .d files. Use a server this user owns.
+if [[ "${RUSTC_WRAPPER:-}" == "sccache" ]]; then
+    other_owners="$(ps -o user= -C sccache 2> /dev/null | sort -u | grep -vx "$(id -un)" || true)"
+    if [[ -n "$other_owners" ]]; then
+        log "sccache server runs as ${other_owners//$'\n'/,}, restarting it as $(id -un)"
+        sudo pkill -x sccache || true
+    fi
+    if ! sccache --start-server > /dev/null 2>&1 && ! sccache --show-stats > /dev/null 2>&1; then
+        log "sccache server did not start, building without the shared cache"
+        unset RUSTC_WRAPPER
+    fi
+fi
+
 log "pinning node and uv"
 NODE_VERSION="$(tr -d 'v[:space:]' < .nvmrc)"
 mise use -g "node@${NODE_VERSION}" "uv@${UV_VERSION}"
