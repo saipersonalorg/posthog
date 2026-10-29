@@ -23,7 +23,7 @@ PROTOC_SHA256_ARM64=1de522032a8b194002fe35cab86d747848238b5e4de4f99648372079f5b4
 SQLX_CLI_VERSION=0.8.3
 # pyproject.toml requires uv >= 0.13.4. The image's uv is older.
 UV_VERSION=0.13.6
-STACK_TIMEOUT_SECONDS="${POSTHOG_ON_WARM_STACK_TIMEOUT:-1200}"
+STACK_TIMEOUT_SECONDS="${POSTHOG_ON_WARM_STACK_TIMEOUT:-600}"
 
 export POSTHOG_TELEMETRY_OPT_OUT=1
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -200,10 +200,23 @@ export FLAGS_READ_STORE_DATABASE_URL="${FLAGS_READ_STORE_DATABASE_URL:-postgres:
 bin/migrate --scope=cyclotron --scope=flags-read-store
 
 log "waiting for the stack to be ready (up to ${STACK_TIMEOUT_SECONDS}s)"
-if ! phrocs wait --timeout "$STACK_TIMEOUT_SECONDS"; then
-    echo "[on-warm] the dev stack did not become ready. Logs: $REPO_ROOT/.posthog/.generated/logs/" >&2
-    exit 1
-fi
+# `phrocs wait` returns on the first crash, but phrocs restarts a crashed unit by
+# itself. A unit can crash once while a cold box is still busy, so wait again
+# until the deadline. Exit code 1 is a crash; 2 is a timeout.
+deadline=$((SECONDS + STACK_TIMEOUT_SECONDS))
+crashes=0
+until phrocs wait --timeout "$((deadline > SECONDS ? deadline - SECONDS : 1))"; do
+    rc=$?
+    crashes=$((crashes + 1))
+    if [[ "$rc" -ne 1 || "$crashes" -ge 5 || "$SECONDS" -ge "$deadline" ]]; then
+        echo "[on-warm] the dev stack did not become ready. Logs: $REPO_ROOT/.posthog/.generated/logs/" >&2
+        # phrocs prints only the tail of a crashed unit. Show where each panic starts.
+        grep -m1 -H -A12 -E "fatal error|panic:|Traceback" .posthog/.generated/logs/*.log >&2 || true
+        exit 1
+    fi
+    log "a unit crashed and phrocs restarts it, waiting again (${crashes})"
+    sleep 10
+done
 curl -sf -o /dev/null --max-time 10 http://localhost:8010/_health
 
 log "ready: PostHog on :8010"
