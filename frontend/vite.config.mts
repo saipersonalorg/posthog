@@ -155,7 +155,8 @@ export default defineConfig(({ mode }) => {
             // nosemgrep: trailofbits.javascript.apollo-graphql.v3-cors-audit.v3-potentially-bad-cors
             cors: true,
             // JS_URL overrides for sandbox environments where Vite is exposed on a different port.
-            origin: process.env.JS_URL || 'http://localhost:8234',
+            // An empty JS_URL keeps asset URLs relative, so the :8010 dev proxy serves them from the page's origin.
+            origin: process.env.JS_URL ?? 'http://localhost:8234',
             hmr: process.env.JS_URL ? { clientPort: parseInt(process.env.JS_URL.split(':').pop()!) } : undefined,
             proxy: {
                 '/static': {

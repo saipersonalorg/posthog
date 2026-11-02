@@ -31,6 +31,7 @@ services:
             - 'feature-flags:host-gateway'
             - 'hypercache-server:host-gateway'
             - 'push-api:host-gateway'
+            - 'vite:host-gateway'
         environment:
             CADDYFILE: |
                 {
@@ -106,6 +107,22 @@ services:
                         path /api/push_subscriptions/
                     }
 
+                    # Vite dev server paths. The browser asks for them here only when JS_URL is empty,
+                    # which serves the app and its dev bundle from one origin (for example behind a
+                    # per-port HTTPS proxy that cannot also expose :8234 under a known hostname).
+                    @vite {
+                        path /@*
+                        path /src/*
+                        path /node_modules/*
+                        path /__vite_ping
+                    }
+
+                    # Vite's HMR client always asks for its own subprotocol. A proxy in front can rewrite the
+                    # hop-by-hop Connection and Upgrade headers, so do not match on those.
+                    @vite-hmr {
+                        header Sec-WebSocket-Protocol vite-*
+                    }
+
                     handle @capture-ai {
                         reverse_proxy capture-ai:3309
                     }
@@ -144,6 +161,14 @@ services:
 
                     handle @push-subscriptions {
                         reverse_proxy push-api:6750
+                    }
+
+                    handle @vite-hmr {
+                        reverse_proxy vite:8234
+                    }
+
+                    handle @vite {
+                        reverse_proxy vite:8234
                     }
 
                     handle {
